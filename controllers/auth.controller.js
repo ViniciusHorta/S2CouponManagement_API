@@ -3,12 +3,10 @@ const bcrypt = require("bcryptjs");
 
 // Aqui você deve configurar um usuário de administração para simulação
 const adminUser = {
-  username: "admin",
-  //password: "$2a$10$khJps0Yah80q46VtYgqv0O3dFC/O0w82fuYo9yqHlJzHTnt1Szmlu",
-  password: "$2a$10$KRpkbHEtnJV4hRfuvx2ZjejmhuPeDBV6lF3po6LVvhjlwowfQubGu",
-  role: "administrator",
-  email: "admin@s2therapy.com"
-  //password: "$2a$10$dF3oPUfFYR64L9E54Nn56eQqKP.R2PCDtiyITfpMpyPP6NUJLQ9si", // senha hashada "admin123"
+  username: process.env.ADMIN_USER_NAME,
+  password: process.env.ADMIN_PW,
+  role: process.env.ADMIN_ROLE,
+  email: process.env.ADMIN_EMAIL,
 };
 
 // Função para gerar o JWT e o Refresh Token
