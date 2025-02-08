@@ -1,3 +1,4 @@
+const { setLogFunction } = require("firebase-admin/firestore");
 const db = require("../config/firebase");
 const dayjs = require('dayjs');
 
@@ -118,7 +119,7 @@ const isValid = (coupon, userId) => {
 
   return { valid: true, message: "Coupon is valid.", status: 200 }
 
-}
+};
 
 // ✅ 1. Validar se um cupom é válido para um usuário
 exports.validateCoupon = async (req, res) => {
@@ -178,7 +179,7 @@ const updateCouponStats = async (userId, couponCode, discountValue) => {
       });
     }
   });
-}
+};
 
 // ✅ 2. Registrar o uso do cupom
 exports.redeemCoupon = async (req, res) => {
@@ -246,37 +247,50 @@ exports.getCouponsStats = async (req, res) => {
       couponsActiveWithLimit: 0,
       couponsUsedByUser: [],
       sumOfValuesSpent: 0,
+      totalUniqueUsers: new Set(),
+      uniqueUsersPerDay: {},
+      discountsPerDay: {},
+      totalDiscounts: 0,
+      totalCouponsUsed: 0,
+      couponsUsedPerDay: {},
+      monthlyStats: [],
     };
 
-    // Filtro de data
-    const start = startDate ? new Date(startDate) : new Date("1970-01-01");
-    const end = endDate ? new Date(endDate) : new Date();
+    const start = startDate ? dayjs(startDate) : dayjs("1970-01-01");
+    const end = endDate ? dayjs(endDate) : dayjs();
+
+    // Criar uma lista de todas as datas no intervalo
+    const allDates = [];
+    let currentDate = start;
+    while (currentDate.isBefore(end) || currentDate.isSame(end, "day")) {
+      const formattedDate = currentDate.format("YYYY-MM-DD");
+      allDates.push(formattedDate);
+      
+      // Inicializar valores com 0 para garantir que todas as datas apareçam
+      couponStats.uniqueUsersPerDay[formattedDate] = 0;
+      couponStats.discountsPerDay[formattedDate] = 0;
+      couponStats.couponsUsedPerDay[formattedDate] = 0;
+
+      currentDate = currentDate.add(1, "day");
+    }
 
     // Consultar todos os cupons
     const couponsRef = db.collection("coupons");
     const couponsSnapshot = await couponsRef.get();
+    
     couponsSnapshot.forEach((doc) => {
       const coupon = doc.data();
-      const expirationDate = new Date(coupon.expirationDate);
-      const startDate = new Date(coupon.startDate);
+      const expirationDate = dayjs(coupon.expirationDate);
+      const couponStartDate = dayjs(coupon.startDate);
 
-      // Filtrando cupons por data de criação
-      if (startDate >= start && expirationDate >= end) {
-        // Cupons inativos
-        if (coupon.status === "inactive") {
-          couponStats.couponsInactive++;
-        }
-
-        // Cupons ativos
+      if (couponStartDate.isAfter(start) && expirationDate.isAfter(end)) {
+        if (coupon.status === "inactive") couponStats.couponsInactive++;
         if (coupon.status === "active") {
           couponStats.couponsActive++;
 
-          // Cupons que atingiram o limite global
           if (coupon.maxUsesGlobal <= coupon.usersUsed.length) {
             couponStats.couponsActiveReachedLimit++;
           }
-
-          // Cupons com limite por usuário
           if (coupon.maxUsesPerUser > 0) {
             couponStats.couponsActiveWithLimit++;
           }
@@ -286,42 +300,99 @@ exports.getCouponsStats = async (req, res) => {
 
     // Consultar o uso de cupons por usuário
     const usageRef = db.collection("coupon_usage");
-    const usageSnapshot = await usageRef.where("timestamp", ">=", start).where("timestamp", "<=", end).get();
+    const usageSnapshot = await usageRef
+      .where("timestamp", ">=", start.toDate())
+      .where("timestamp", "<=", end.add(1, "day").toDate())
+      .get();
+
+    // Criação de uma estrutura para armazenar o valor gasto por cada cupom em cada mês
+    const couponsSpentByMonth = {};
 
     usageSnapshot.forEach((doc) => {
       const usage = doc.data();
-      couponStats.sumOfValuesSpent += (usage.originalPrice - usage.valueAfterDiscount);
+      const usageDate = dayjs(usage.timestamp.toDate()).format("YYYY-MM-DD");
+      
+      // Usuários únicos por dia
+      if (!couponStats.uniqueUsersPerDay[usageDate]) {
+        couponStats.uniqueUsersPerDay[usageDate] = 0;
+      }
+      couponStats.uniqueUsersPerDay[usageDate] += 1;
+      couponStats.totalUniqueUsers.add(usage.userId);
+
+      // Valor gasto pelo usuário
+      const discountValue = usage.originalPrice - usage.valueAfterDiscount;
+      couponStats.sumOfValuesSpent += discountValue;
+
+      // Valor gasto em descontos por dia
+      if (!couponStats.discountsPerDay[usageDate]) {
+        couponStats.discountsPerDay[usageDate] = 0;
+      }
+      couponStats.discountsPerDay[usageDate] += discountValue;
+
+      // Total de descontos no período
+      couponStats.totalDiscounts += discountValue;
+
+      // Contagem de cupons usados por dia
+      if (!couponStats.couponsUsedPerDay[usageDate]) {
+        couponStats.couponsUsedPerDay[usageDate] = 0;
+      }
+      couponStats.couponsUsedPerDay[usageDate]++;
+
+      // Total de cupons usados no período
+      couponStats.totalCouponsUsed++;
 
       // Top 100 usuários que mais usaram cupons
       const userIndex = couponStats.couponsUsedByUser.findIndex(user => user.userId === usage.userId);
-
       if (userIndex !== -1) {
-        // Usuário já existe na lista, atualizar os dados
         couponStats.couponsUsedByUser[userIndex].couponCodes.push(usage.couponCode);
-        couponStats.couponsUsedByUser[userIndex].spent += (usage.originalPrice - usage.valueAfterDiscount);
-      } else {
-        // Adicionar novo usuário se ainda há espaço na lista (top 100)
-        if (couponStats.couponsUsedByUser.length < 100) {
-          couponStats.couponsUsedByUser.push({
-            userId: usage.userId,
-            couponCodes: [usage.couponCode], // Array de cupons usados
-            spent: (usage.originalPrice - usage.valueAfterDiscount), // Soma total de descontos
-          });
-        }
+        couponStats.couponsUsedByUser[userIndex].spent += discountValue;
+      } else if (couponStats.couponsUsedByUser.length < 100) {
+        couponStats.couponsUsedByUser.push({
+          userId: usage.userId,
+          couponCodes: [usage.couponCode],
+          spent: discountValue,
+        });
       }
+
+      // Atualizar o valor gasto por cupom por mês
+      const couponCode = usage.couponCode;
+      const month = dayjs(usage.timestamp.toDate()).format("YYYY-MM");
+      if (!couponsSpentByMonth[month]) {
+        couponsSpentByMonth[month] = {};
+      }
+      if (!couponsSpentByMonth[month][couponCode]) {
+        couponsSpentByMonth[month][couponCode] = 0;
+      }
+      couponsSpentByMonth[month][couponCode] += discountValue;
     });
 
-  const lastMonths = getLastMonths(7, end); // Obtém os últimos 7 meses apartir da data selecionada
-  const statsPromises = lastMonths.map((month) => db.collection("couponStats").doc(month).get());
+    // Garantir que todas as datas tenham um valor válido (mesmo se não houver registros)
+    allDates.forEach((date) => {
+      couponStats.uniqueUsersPerDay[date] = couponStats.uniqueUsersPerDay[date] || 0;
+      couponStats.discountsPerDay[date] = couponStats.discountsPerDay[date] || 0;
+      couponStats.couponsUsedPerDay[date] = couponStats.couponsUsedPerDay[date] || 0;
+    });
 
-  const statsSnapshots = await Promise.all(statsPromises); // Aguarda todas as consultas
+    // Obter estatísticas dos últimos 7 meses
+    const lastMonths = getLastMonths(7, end);
+    const statsPromises = lastMonths.map((month) => db.collection("couponStats").doc(month).get());
+    const statsSnapshots = await Promise.all(statsPromises);
 
-  const stats = statsSnapshots.map((doc, index) => ({
-    month: lastMonths[index], // Nome do mês
-    data: doc.exists ? doc.data() : { totalCouponsUsed: {}, totalSavings: 0, uniqueUsersUsedCoupons: [] }
-  }));
+    const stats = statsSnapshots.map((doc, index) => {
+      const month = lastMonths[index];
+      const data = doc.exists ? doc.data() : { totalCouponsUsed: {}, totalSavings: 0, uniqueUsersUsedCoupons: [] };
 
-    res.status(200).json({ ...couponStats, monthlyStats: stats});
+      // Adicionar o valor gasto por cupom
+      const monthlyData = { ...data, totalSpentByCoupon: couponsSpentByMonth[month] || {} };
+
+      return {
+        month: month,
+        data: monthlyData,
+      };
+    });
+
+    res.status(200).json({ ...couponStats, monthlyStats: stats });
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -329,4 +400,4 @@ exports.getCouponsStats = async (req, res) => {
 
 function getLastMonths(qtdMonths, date) {
   return [...Array(qtdMonths)].map((_, i) => dayjs(date).subtract(i, 'month').format('YYYY-MM'));
-}
+};
