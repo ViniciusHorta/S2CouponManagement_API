@@ -366,6 +366,9 @@ exports.getCouponsStats = async (req, res) => {
       couponsSpentByMonth[month][couponCode] += discountValue;
     });
 
+    // Converter os Sets em números
+    couponStats.totalUniqueUsers = couponStats.totalUniqueUsers.size;
+
     // Garantir que todas as datas tenham um valor válido (mesmo se não houver registros)
     allDates.forEach((date) => {
       couponStats.uniqueUsersPerDay[date] = couponStats.uniqueUsersPerDay[date] || 0;
@@ -377,6 +380,8 @@ exports.getCouponsStats = async (req, res) => {
     const lastMonths = getLastMonths(7, end);
     const statsPromises = lastMonths.map((month) => db.collection("couponStats").doc(month).get());
     const statsSnapshots = await Promise.all(statsPromises);
+
+    
 
     const stats = statsSnapshots.map((doc, index) => {
       const month = lastMonths[index];
