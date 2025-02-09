@@ -19,6 +19,7 @@ exports.createCoupon = async (req, res) => {
       maxUsesPerUser: data.maxUsesPerUser,
       status: data.status,
       usersUsed: [],
+      maxDiscount: data.maxDiscount, // Adicionando o limite máximo de desconto
     };
 
     // Save to Firestore
@@ -93,8 +94,9 @@ exports.deleteCoupon = async (req, res) => {
   }
 };
 
-const isValid = (coupon, userId) => {
+const isValid = (coupon, userId, orderTotal) => {
   const now = new Date(new Date().toISOString().split("T")[0]);
+  
   // Verificações:
   if (coupon.status !== "active") {
     return { valid: false, message: "Coupon is inactive.", status: 400 };
@@ -118,17 +120,20 @@ const isValid = (coupon, userId) => {
   }
 
   return { valid: true, message: "Coupon is valid.", status: 200 }
-
 };
 
 // ✅ 1. Validar se um cupom é válido para um usuário
 exports.validateCoupon = async (req, res) => {
   try {
     const { code } = req.params;
-    const { userId } = req.query;
+    const { userId, orderTotal } = req.query;
 
     if (!userId) {
       return res.status(400).json({ message: "User ID is required." });
+    }
+
+    if (!orderTotal) {
+      return res.status(400).json({ message: "Order total is required for discount validation." });
     }
 
     const couponRef = db.collection("coupons").doc(code);
@@ -140,6 +145,28 @@ exports.validateCoupon = async (req, res) => {
 
     const coupon = couponDoc.data();
     const { status, message, valid } = isValid(coupon, userId)
+
+    // Se o cupom for válido, calcular o valor final do pedido com o desconto aplicado
+    if (valid) {
+      let finalTotal = parseFloat(orderTotal);
+      if (coupon.discount.type === "percentage") {
+        const discountValue = (finalTotal * coupon.discount.value) / 100;
+        if (coupon.maxDiscount) {
+          finalTotal = finalTotal - Math.min(discountValue, coupon.maxDiscount);
+        } else {
+          finalTotal -= discountValue;
+        }
+      } else if (coupon.discount.type === "fixed") {
+        finalTotal -= parseFloat(coupon.discount.value);
+      }
+
+      return res.status(status).json({ 
+        message: message,
+        valid: valid,
+        finalTotal: finalTotal.toFixed(2), // Retorna o total final após o desconto
+      });
+    }
+
     return res.status(status).json({ message: message, valid: valid });
 
   } catch (error) {
@@ -184,7 +211,12 @@ const updateCouponStats = async (userId, couponCode, discountValue) => {
 // ✅ 2. Registrar o uso do cupom
 exports.redeemCoupon = async (req, res) => {
   try {
-    const { couponCode, userId, originalPrice } = req.body;
+    const { couponCode, userId, originalPrice, appliedAt } = req.body; // Recebendo 'appliedAt'
+
+    // Verificar se o "appliedAt" foi enviado, se não, retornar erro
+    if (!appliedAt) {
+      return res.status(400).json({ message: "Application space (appliedAt) is required." });
+    }
 
     // Buscar o cupom
     const couponRef = db.collection("coupons").doc(couponCode);
@@ -195,7 +227,7 @@ exports.redeemCoupon = async (req, res) => {
     }
 
     const coupon = couponDoc.data();
-    const { status, message, valid } = isValid(coupon, userId)
+    const { status, message, valid } = isValid(coupon, userId, originalPrice);
     if (!valid) {
       return res.status(status).json({ message: message });
     }
@@ -207,22 +239,31 @@ exports.redeemCoupon = async (req, res) => {
     // Calcular o valor com o desconto
     let discount = 0;
     if (coupon.discount.type === "percentage") {
+      // Calcula o desconto baseado no percentual
       discount = (originalPrice * coupon.discount.value) / 100;
+      
+      // Verifica se o desconto excede o limite máximo
+      if (coupon.maxDiscount && discount > coupon.maxDiscount) {
+        discount = coupon.maxDiscount;  // Limita o desconto ao valor máximo permitido
+      }
     } else if (coupon.discount.type === "fixed") {
+      // Desconto fixo
       discount = coupon.discount.value;
     }
 
     const valueAfterDiscount = originalPrice - discount;
 
-    // Registrar o valor gasto
+    // Registrar o valor gasto, incluindo o espaço onde o cupom foi aplicado
     await db.collection("coupon_usage").add({
       userId: userId,
       couponCode: couponCode,
       originalPrice: originalPrice,
       valueAfterDiscount: valueAfterDiscount,
+      appliedAt: appliedAt,  // Registrando o espaço onde o cupom foi aplicado
       timestamp: new Date(),
     });
 
+    // Atualizar as estatísticas do cupom (se necessário)
     await updateCouponStats(userId, couponCode, (originalPrice - discount));
 
     res.status(200).json({
@@ -254,6 +295,9 @@ exports.getCouponsStats = async (req, res) => {
       totalCouponsUsed: 0,
       couponsUsedPerDay: {},
       monthlyStats: [],
+      couponsPerSpaceByMonth: {}, // Adicionando estrutura para armazenar cupons por espaço e mês
+      valueSpentPerSpaceByMonth: {}, // Adicionando estrutura para armazenar valores gastos por espaço e mês
+      spacesUsedPerDay: {}, // Adicionando estrutura para contar espaços usados por dia
     };
 
     const start = startDate ? dayjs(startDate) : dayjs("1970-01-01");
@@ -265,11 +309,12 @@ exports.getCouponsStats = async (req, res) => {
     while (currentDate.isBefore(end) || currentDate.isSame(end, "day")) {
       const formattedDate = currentDate.format("YYYY-MM-DD");
       allDates.push(formattedDate);
-      
+
       // Inicializar valores com 0 para garantir que todas as datas apareçam
       couponStats.uniqueUsersPerDay[formattedDate] = 0;
       couponStats.discountsPerDay[formattedDate] = 0;
       couponStats.couponsUsedPerDay[formattedDate] = 0;
+      couponStats.spacesUsedPerDay[formattedDate] = 0; // Iniciando o contador para espaços
 
       currentDate = currentDate.add(1, "day");
     }
@@ -277,7 +322,7 @@ exports.getCouponsStats = async (req, res) => {
     // Consultar todos os cupons
     const couponsRef = db.collection("coupons");
     const couponsSnapshot = await couponsRef.get();
-    
+
     couponsSnapshot.forEach((doc) => {
       const coupon = doc.data();
       const expirationDate = dayjs(coupon.expirationDate);
@@ -311,7 +356,8 @@ exports.getCouponsStats = async (req, res) => {
     usageSnapshot.forEach((doc) => {
       const usage = doc.data();
       const usageDate = dayjs(usage.timestamp.toDate()).format("YYYY-MM-DD");
-      
+      const space = usage.appliedAt; // Capturando o espaço onde o cupom foi aplicado
+
       // Usuários únicos por dia
       if (!couponStats.uniqueUsersPerDay[usageDate]) {
         couponStats.uniqueUsersPerDay[usageDate] = 0;
@@ -364,7 +410,31 @@ exports.getCouponsStats = async (req, res) => {
         couponsSpentByMonth[month][couponCode] = 0;
       }
       couponsSpentByMonth[month][couponCode] += discountValue;
+
+      // Adicionando as métricas para o espaço
+      if (!couponStats.couponsPerSpaceByMonth[month]) {
+        couponStats.couponsPerSpaceByMonth[month] = {};
+        couponStats.valueSpentPerSpaceByMonth[month] = {};
+      }
+      // Contando os cupons usados por espaço por mês
+      if (!couponStats.couponsPerSpaceByMonth[month][space]) {
+        couponStats.couponsPerSpaceByMonth[month][space] = 0;
+        couponStats.valueSpentPerSpaceByMonth[month][space] = 0;
+      }
+      couponStats.couponsPerSpaceByMonth[month][space]++;
+      couponStats.valueSpentPerSpaceByMonth[month][space] += discountValue;
+
+      // Contando espaços únicos por dia
+      if (!couponStats.spacesUsedPerDay[usageDate]) {
+        couponStats.spacesUsedPerDay[usageDate] = new Set(); // Usando Set para garantir que contamos cada espaço apenas uma vez por dia
+      }
+      couponStats.spacesUsedPerDay[usageDate].add(space);
     });
+
+    // Converter os Sets em números para as estatísticas de espaços por dia
+    for (const date in couponStats.spacesUsedPerDay) {
+      couponStats.spacesUsedPerDay[date] = couponStats.spacesUsedPerDay[date].size; // Quantidade de espaços distintos
+    }
 
     // Converter os Sets em números
     couponStats.totalUniqueUsers = couponStats.totalUniqueUsers.size;
@@ -380,8 +450,6 @@ exports.getCouponsStats = async (req, res) => {
     const lastMonths = getLastMonths(7, end);
     const statsPromises = lastMonths.map((month) => db.collection("couponStats").doc(month).get());
     const statsSnapshots = await Promise.all(statsPromises);
-
-    
 
     const stats = statsSnapshots.map((doc, index) => {
       const month = lastMonths[index];
@@ -405,4 +473,59 @@ exports.getCouponsStats = async (req, res) => {
 
 function getLastMonths(qtdMonths, date) {
   return [...Array(qtdMonths)].map((_, i) => dayjs(date).subtract(i, 'month').format('YYYY-MM'));
+};
+
+exports.getCouponDetails = async (req, res) => {
+  try {
+    const { code } = req.params;
+
+    // Buscar o cupom
+    const couponRef = db.collection("coupons").doc(code);
+    const couponDoc = await couponRef.get();
+
+    if (!couponDoc.exists) {
+      return res.status(404).json({ message: "Coupon not found." });
+    }
+
+    const coupon = couponDoc.data();
+    const { 
+      discount,
+      maxDiscount,
+      maxUsesGlobal,
+      maxUsesPerUser,
+      status,
+      startDate,
+      expirationDate, } = coupon; // Nome, limite de valor, e data de validade
+
+    // Consultar histórico de uso do cupom
+    const usageRef = db.collection("coupon_usage").where("couponCode", "==", code);
+    const usageSnapshot = await usageRef.get();
+
+    const usageHistory = [];
+    usageSnapshot.forEach((doc) => {
+      const usage = doc.data();
+      const usageDate = dayjs(usage.timestamp.toDate()).format("YYYY-MM-DD");
+      const totalSpent = usage.originalPrice - usage.valueAfterDiscount;
+      usageHistory.push({
+        userId: usage.userId,
+        usageDate: usageDate,
+        totalSpent: totalSpent,
+        valueAfterDiscount: usage.valueAfterDiscount,
+      });
+    });
+
+    res.status(200).json({
+      code,
+      discount,
+      maxDiscount,
+      maxUsesGlobal,
+      maxUsesPerUser,
+      status,
+      startDate: dayjs(startDate).format("YYYY-MM-DD"),
+      expirationDate: dayjs(expirationDate).format("YYYY-MM-DD"),
+      usageHistory: usageHistory,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 };
