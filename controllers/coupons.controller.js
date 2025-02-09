@@ -99,24 +99,24 @@ const isValid = (coupon, userId, orderTotal) => {
   
   // Verificações:
   if (coupon.status !== "active") {
-    return { valid: false, message: "Coupon is inactive.", status: 400 };
+    return { valid: false, message: "Coupon is inactive.", status: 200 };
   }
   if (new Date(coupon.startDate) > now) {
-    return { valid: false, message: "Coupon is not valid yet.", status: 400 };
+    return { valid: false, message: "Coupon is not valid yet.", status: 200 };
   }
   if (coupon.expirationDate && new Date(coupon.expirationDate) < now) {
-    return { valid: false, message: "Coupon has expired.", status: 400 };
+    return { valid: false, message: "Coupon has expired.", status: 200 };
   }
 
   // Verifica uso global
   if (coupon.maxUsesGlobal !== "" && coupon.usersUsed.length >= coupon.maxUsesGlobal) {
-    return { valid: false, message: "Coupon usage limit reached.", status: 400 };
+    return { valid: false, message: "Coupon usage limit reached.", status: 200 };
   }
 
   // Verifica uso pelo usuário
   const userUses = coupon.usersUsed.filter((entry) => entry === userId).length;
   if (coupon.maxUsesPerUser !== null && userUses >= coupon.maxUsesPerUser) {
-    return { valid: false, message: "User has reached max usage limit for this coupon.", status: 400 };
+    return { valid: false, message: "User has reached max usage limit for this coupon.", status: 200 };
   }
 
   return { valid: true, message: "Coupon is valid.", status: 200 }
