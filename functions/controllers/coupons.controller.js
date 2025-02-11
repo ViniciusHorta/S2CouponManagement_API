@@ -1,7 +1,5 @@
-const { setLogFunction } = require("firebase-admin/firestore");
 const db = require("../config/firebase");
 const dayjs = require('dayjs');
-
 
 // Create a coupon
 exports.createCoupon = async (req, res) => {
@@ -94,9 +92,9 @@ exports.deleteCoupon = async (req, res) => {
   }
 };
 
-const isValid = (coupon, userId, orderTotal) => {
+const isValid = (coupon, userId) => {
   const now = new Date(new Date().toISOString().split("T")[0]);
-  
+
   // Verificações:
   if (coupon.status !== "active") {
     return { valid: false, message: "Coupon is inactive.", status: 200 };
@@ -160,7 +158,7 @@ exports.validateCoupon = async (req, res) => {
         finalTotal -= parseFloat(coupon.discount.value);
       }
 
-      return res.status(status).json({ 
+      return res.status(status).json({
         message: message,
         valid: valid,
         finalTotal: finalTotal.toFixed(2), // Retorna o total final após o desconto
@@ -175,7 +173,7 @@ exports.validateCoupon = async (req, res) => {
   }
 };
 
-const updateCouponStats = async (userId, couponCode, discountValue) => {
+const updateCouponStats = async (userId, couponCode, discountValue, spaceId) => {
   const now = new Date();
   const yearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`; // "YYYY-MM"
   const statsRef = db.collection("couponStats").doc(yearMonth);
@@ -188,6 +186,7 @@ const updateCouponStats = async (userId, couponCode, discountValue) => {
       transaction.set(statsRef, {
         yearMonth,
         totalCouponsUsed: { [couponCode]: 1 },
+        totalSpacesUsed: { [spaceId]: 1 },
         totalSavings: discountValue,
         uniqueUsersUsedCoupons: [userId]
       });
@@ -196,13 +195,17 @@ const updateCouponStats = async (userId, couponCode, discountValue) => {
       const updatedCouponsUsed = data.totalCouponsUsed || {};
       updatedCouponsUsed[couponCode] = (updatedCouponsUsed[couponCode] || 0) + 1;
 
+      const updatedSpacesUsed = data.totalSpacesUsed || {};
+      updatedSpacesUsed[spaceId] = (updatedSpacesUsed[spaceId] || 0) + 1;
+
       const uniqueUsers = new Set(data.uniqueUsersUsedCoupons || []);
       uniqueUsers.add(userId);
 
       transaction.update(statsRef, {
         totalCouponsUsed: updatedCouponsUsed,
         totalSavings: (data.totalSavings || 0) + discountValue,
-        uniqueUsersUsedCoupons: Array.from(uniqueUsers)
+        uniqueUsersUsedCoupons: Array.from(uniqueUsers),
+        totalSpacesUsed: updatedSpacesUsed,
       });
     }
   });
@@ -241,7 +244,7 @@ exports.redeemCoupon = async (req, res) => {
     if (coupon.discount.type === "percentage") {
       // Calcula o desconto baseado no percentual
       discount = (originalPrice * coupon.discount.value) / 100;
-      
+
       // Verifica se o desconto excede o limite máximo
       if (coupon.maxDiscount && discount > coupon.maxDiscount) {
         discount = coupon.maxDiscount;  // Limita o desconto ao valor máximo permitido
@@ -264,7 +267,7 @@ exports.redeemCoupon = async (req, res) => {
     });
 
     // Atualizar as estatísticas do cupom (se necessário)
-    await updateCouponStats(userId, couponCode, (originalPrice - discount));
+    await updateCouponStats(userId, couponCode, (originalPrice - discount), appliedAt);
 
     res.status(200).json({
       message: "Coupon redeemed successfully!",
@@ -289,6 +292,7 @@ exports.getCouponsStats = async (req, res) => {
       couponsUsedByUser: [],
       sumOfValuesSpent: 0,
       totalUniqueUsers: new Set(),
+      totalUniqueSpaces: new Set(),
       uniqueUsersPerDay: {},
       discountsPerDay: {},
       totalDiscounts: 0,
@@ -364,6 +368,8 @@ exports.getCouponsStats = async (req, res) => {
       }
       couponStats.uniqueUsersPerDay[usageDate] += 1;
       couponStats.totalUniqueUsers.add(usage.userId);
+      couponStats.totalUniqueSpaces.add(usage.appliedAt);
+
 
       // Valor gasto pelo usuário
       const discountValue = usage.originalPrice - usage.valueAfterDiscount;
@@ -431,13 +437,17 @@ exports.getCouponsStats = async (req, res) => {
       couponStats.spacesUsedPerDay[usageDate].add(space);
     });
 
+    console.log(couponStats.spacesUsedPerDay);
     // Converter os Sets em números para as estatísticas de espaços por dia
     for (const date in couponStats.spacesUsedPerDay) {
-      couponStats.spacesUsedPerDay[date] = couponStats.spacesUsedPerDay[date].size; // Quantidade de espaços distintos
+      if (typeof (couponStats.spacesUsedPerDay[date]) === typeof (new Set())) {
+        couponStats.spacesUsedPerDay[date] = couponStats.spacesUsedPerDay[date].size; // Quantidade de espaços distintos
+      }
     }
 
     // Converter os Sets em números
     couponStats.totalUniqueUsers = couponStats.totalUniqueUsers.size;
+    couponStats.totalUniqueSpaces = couponStats.totalUniqueSpaces.size;
 
     // Garantir que todas as datas tenham um valor válido (mesmo se não houver registros)
     allDates.forEach((date) => {
@@ -473,7 +483,7 @@ exports.getCouponsStats = async (req, res) => {
 
 function getLastMonths(qtdMonths, date) {
   return [...Array(qtdMonths)].map((_, i) => dayjs(date).subtract(i, 'month').format('YYYY-MM'));
-};
+}
 
 exports.getCouponDetails = async (req, res) => {
   try {
@@ -488,7 +498,7 @@ exports.getCouponDetails = async (req, res) => {
     }
 
     const coupon = couponDoc.data();
-    const { 
+    const {
       discount,
       maxDiscount,
       maxUsesGlobal,
@@ -510,6 +520,7 @@ exports.getCouponDetails = async (req, res) => {
         userId: usage.userId,
         usageDate: usageDate,
         totalSpent: totalSpent,
+        spaceId: usage.appliedAt,
         valueAfterDiscount: usage.valueAfterDiscount,
       });
     });

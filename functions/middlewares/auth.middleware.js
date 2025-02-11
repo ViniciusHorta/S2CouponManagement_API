@@ -21,7 +21,8 @@ const verifyToken = async (req, res, next) => {
     req.user = decodedToken;
     next();  // Prossegue para a próxima função de middleware ou rota
 
-  } catch (error) {
+  } catch (err) {
+    console.error(err);
     return res.status(401).json({ error: "Token is not valid" });
   }
 };
