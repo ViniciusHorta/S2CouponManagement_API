@@ -406,6 +406,8 @@ exports.getCouponsStats = async (req, res) => {
         });
       }
 
+      couponStats.couponsUsedByUser = couponStats.couponsUsedByUser.sort((a, b) => b.spent - a.spent);
+
       // Atualizar o valor gasto por cupom por mês
       const couponCode = usage.couponCode;
       const month = dayjs(usage.timestamp.toDate()).format("YYYY-MM");
@@ -437,7 +439,6 @@ exports.getCouponsStats = async (req, res) => {
       couponStats.spacesUsedPerDay[usageDate].add(space);
     });
 
-    console.log(couponStats.spacesUsedPerDay);
     // Converter os Sets em números para as estatísticas de espaços por dia
     for (const date in couponStats.spacesUsedPerDay) {
       if (typeof (couponStats.spacesUsedPerDay[date]) === typeof (new Set())) {
